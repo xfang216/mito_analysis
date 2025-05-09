@@ -32,7 +32,7 @@ def mito_tracking(
     for seg in range(nSeg):
         ar_tmp=ar_mito[seg*interval:(seg+1)*interval,:,:].copy()
         minFrame=interval
-        f = tp.batch(ar_tmp, pixel_size, minmass=minmass)
+        f = tp.batch(ar_tmp, pixel_size, minmass=minmass, characterize=True)
         t_before = tp.link(f, maxDisp, memory=memory)
         traj = tp.filter_stubs(t_before, minFrame)
         trajs.append(traj)
@@ -158,7 +158,6 @@ def extract_mitodynamics(frameRate=20,
                  distThresh_upper=400,
                  treat=90,
                  nSeg=10,
-                 mapcolor='GnBu',
                  ar_mito=None,
                  ar_cyto=None,
                  ar_f=None,
@@ -167,69 +166,76 @@ def extract_mitodynamics(frameRate=20,
                  path=None,
                 ):
     
+    # add in flow direction information
+    trajs_new=[]
+
+    for seg in range(nSeg):
+        traj=trajs[seg]
+        
+        # for 'overlap' and 'nonoverlap' trajs, there could be frames without particles; we'll ignore those frames
+        try: 
+            dpr = traj.groupby('particle').apply(lambda g: get_dotproduct(g, center)).rename('dot_product')
+        except: 
+            IndexError
+        direction = dpr.apply(classify_by_dpr).rename('direction')
+
+        traj_new = traj.merge(dpr, on='particle')
+        traj_new = traj_new.merge(direction, on='particle')
+
+        trajs_new.append(traj_new)
+    
+    
     traction_file=path+'/TFM_analysis.csv'
     df=pd.read_csv(traction_file)
     es=df['energy_per_area'].values
     ts=np.linspace(0,len(es)*frameRate/60,len(es))
     
-    data={'nuc':{},'peri':{}}
+    locs=['nuc','peri']
+    dirs=['retrograde','anterograde']
     
-    for key in data.keys():
-        vs=[] # velocity in this region
-        vs_temporal={'before':[],'after':[]} # velocity before and after treatment
-        mitoCa_temporal={'before':[],'after':[]} # mito Ca before and after treatment
-        cytoCa_temporal={'before':[],'after':[]} # cyto Ca before and after treatment
-        vs_time=[] # velocity time-series segmented
-        mitoCa_time=[] # mitoCa time-series segmented
-        cytoCa_time=[] # cytoCa time-series segmented
-        esLocal_time=[] # local strain energy time-series segmented
-        es_time=[] # whole-cell strain energy time-series segmented
-        vs_time_median=[] 
-        mitoCa_time_median=[]
-        cytoCa_time_median=[]
-        es_time_median=[]
-        
-        data[key]={  
-                'vs':vs,
-                'vs_temporal':vs_temporal,
-                'mitoCa_temporal':mitoCa_temporal,
-                'cytoCa_temporal':cytoCa_temporal,
-                'vs_time':vs_time,
-                'mitoCa_time':mitoCa_time,
-                'cytoCa_time':cytoCa_time,
-                'esLocal_time':esLocal_time,
-                'es_time':es_time,
-                'vs_time_median':vs_time_median,
-                'mitoCa_time_median':mitoCa_time_median,
-                'cytoCa_time_median':cytoCa_time_median,
-                'es_time_median':es_time_median,   
-                }
+    # create dict to store data
+    data={}
+    for loc in locs:
+        data[loc]={}
+        for direction in dirs:
+            data[loc][direction]={  
+                    'vs':[],
+                    'vs_temporal':{'before':[],'after':[]},
+                    'mitoCa_temporal':{'before':[],'after':[]},
+                    'cytoCa_temporal':{'before':[],'after':[]},
+                    'vs_time':[],
+                    'mitoCa_time':[],
+                    'cytoCa_time':[],
+                    'esLocal_time':[],
+                    'size_time':[],
+                    'ecc_time':[],
+                    'es_time':[],
+                    'count_time':[],                
+                    }
 
-    cmap=matplotlib.colormaps[mapcolor]
-    gradient=np.linspace(0.1,1,nSeg)
-
-    fig=plt.figure(figsize=(5,5))
-    ax=fig.add_subplot(111)
-    ax.imshow(ar_f,cmap=mapcolor) 
-    ax.scatter(center[1],center[0],color='mediumpurple')
-
+    # collect data
     for seg in range(nSeg):
         start=int(seg*interval)
         end=int((seg+1)*interval)
-            
-        traj=trajs[seg]
-        v_time_nuc=[]
-        ca_mito_time_nuc=[]
-        ca_cyto_time_nuc=[]
-        es_local_time_nuc=[]
-        v_time_peri=[]
-        ca_mito_time_peri=[]
-        ca_cyto_time_peri=[]
-        es_local_time_peri=[]
+        traj=trajs_new[seg]
+
+        sub_data={}
+        for loc in locs:
+            sub_data[loc]={}
+            for direction in dirs:
+                sub_data[loc][direction]={'vs_time':[],'mitoCa_time':[],'cytoCa_time':[],'esLocal_time':[],
+                                         'size_time':[],'ecc_time':[],'count_time':0}
+
         for j in traj['particle'].unique():
+            tj=traj[traj['particle']==j]
+
+            # get size and eccentricity (0: circle, 1: elongated) info
+            size=np.mean(tj['size'].values)
+            ecc=np.mean(tj['ecc'].values)
+
             # get coordinates and distance to nucleus
-            xs=traj[traj['particle']==j]['x'].tolist()
-            ys=traj[traj['particle']==j]['y'].tolist()
+            xs=tj['x'].tolist()
+            ys=tj['y'].tolist()
             nucDist=np.sqrt((xs[0]-center[1])**2+(ys[0]-center[0])**2)
             dist=np.sqrt((xs[0]-xs[-1])**2+(ys[0]-ys[-1])**2)*11 # 1 pixel==11 um
             vel=dist/interval/frameRate
@@ -241,6 +247,7 @@ def extract_mitodynamics(frameRate=20,
             caVals_cyto=[]
             esVals=[]
             mask_time=np.zeros_like(ar_mito)
+
             for i,t in enumerate(ts):
                 x=xs_tmp[i]
                 y=ys_tmp[i]
@@ -257,80 +264,49 @@ def extract_mitodynamics(frameRate=20,
 
             tfm_df=get_force(path=path,forcemask=mask_time)
             esVals=tfm_df['energy_pJ']
-                
+
             ca_mito=np.mean(caVals_mito)
             ca_cyto=np.mean(caVals_cyto)
             es_local=np.mean(esVals)
-            
+
             # nuclear
             if nucDist<distThresh_lower:
-                data['nuc']['vs'].append(vel)
-                ax.plot(xs,ys,c='salmon',lw=0.6)
-                
-                # velocity
-                if seg >= int(treat/interval)-5 and seg < int(treat/interval):
-                    data['nuc']['vs_temporal']['before'].append(vel)
-                elif seg >= int(treat/interval) and seg < int(treat/interval)+5:
-                    data['nuc']['vs_temporal']['after'].append(vel)
-                # Ca
-                if seg >= int(treat/interval)-2 and seg < int(treat/interval):
-                    data['nuc']['mitoCa_temporal']['before'].append(ca_mito)
-                    data['nuc']['cytoCa_temporal']['before'].append(ca_cyto)
-                elif seg >= int(treat/interval) and seg < int(treat/interval)+2:
-                    data['nuc']['mitoCa_temporal']['after'].append(ca_mito)
-                    data['nuc']['cytoCa_temporal']['after'].append(ca_cyto)
-                    
-                # time-series
-                v_time_nuc.append(vel)
-                ca_mito_time_nuc.append(ca_mito)
-                ca_cyto_time_nuc.append(ca_cyto)
-                es_local_time_nuc.append(es_local)
-            
-            # peripheral
-            elif nucDist>=distThresh_lower and nucDist<=distThresh_upper:
-                data['peri']['vs'].append(vel)
-                ax.plot(xs,ys,c='limegreen',lw=0.6)
-                
-                # velocity
-                if seg >= int(treat/interval)-5 and seg < int(treat/interval):
-                    data['peri']['vs_temporal']['before'].append(vel)
-                elif seg >= int(treat/interval) and seg < int(treat/interval)+5:
-                    data['peri']['vs_temporal']['after'].append(vel)
-                # Ca
-                if seg >= int(treat/interval)-2 and seg < int(treat/interval):
-                    data['peri']['mitoCa_temporal']['before'].append(ca_mito)
-                    data['peri']['cytoCa_temporal']['before'].append(ca_cyto)
-                elif seg >= int(treat/interval) and seg < int(treat/interval)+2:
-                    data['peri']['mitoCa_temporal']['after'].append(ca_mito)
-                    data['peri']['cytoCa_temporal']['after'].append(ca_cyto)
-                    
-                # time-series
-                v_time_peri.append(vel)
-                ca_mito_time_peri.append(ca_mito)
-                ca_cyto_time_peri.append(ca_cyto)
-                es_local_time_peri.append(es_local)
+                loc='nuc'
+            else:
+                loc='peri'    
+            direction=tj['direction'].values[0]
+
+            # velocity
+            if seg >= int(treat/interval)-5 and seg < int(treat/interval):
+                data[loc][direction]['vs_temporal']['before'].append(vel)
+            elif seg >= int(treat/interval) and seg < int(treat/interval)+5:
+                data[loc][direction]['vs_temporal']['after'].append(vel)
+            # Ca
+            if seg >= int(treat/interval)-2 and seg < int(treat/interval):
+                data[loc][direction]['mitoCa_temporal']['before'].append(ca_mito)
+                data[loc][direction]['cytoCa_temporal']['before'].append(ca_cyto)
+            elif seg >= int(treat/interval) and seg < int(treat/interval)+2:
+                data[loc][direction]['mitoCa_temporal']['after'].append(ca_mito)
+                data[loc][direction]['cytoCa_temporal']['after'].append(ca_cyto)
+
+            # time-series
+            data[loc][direction]['vs'].append(vel)
+            sub_data[loc][direction]['vs_time'].append(vel)
+            sub_data[loc][direction]['mitoCa_time'].append(ca_mito)
+            sub_data[loc][direction]['cytoCa_time'].append(ca_cyto)
+            sub_data[loc][direction]['esLocal_time'].append(es_local)
+            sub_data[loc][direction]['size_time'].append(size)
+            sub_data[loc][direction]['ecc_time'].append(ecc)
+            sub_data[loc][direction]['count_time']+=1
 
         e=es[start:end]
-        data['nuc']['vs_time'].append(v_time_nuc)
-        data['nuc']['mitoCa_time'].append(ca_mito_time_nuc)
-        data['nuc']['cytoCa_time'].append(ca_cyto_time_nuc)
-        data['nuc']['esLocal_time'].append(es_local_time_nuc)
-        data['nuc']['es_time'].append(e)
-        data['nuc']['vs_time_median'].append(np.median(v_time_nuc))
-        data['nuc']['mitoCa_time_median'].append(np.median(ca_mito_time_nuc))
-        data['nuc']['cytoCa_time_median'].append(np.median(ca_cyto_time_nuc))
-        data['nuc']['es_time_median'].append(np.median(e))
-        data['peri']['vs_time'].append(v_time_peri)
-        data['peri']['mitoCa_time'].append(ca_mito_time_peri)
-        data['peri']['cytoCa_time'].append(ca_cyto_time_peri)
-        data['peri']['esLocal_time'].append(es_local_time_peri)
-        data['peri']['es_time'].append(e)
-        data['peri']['vs_time_median'].append(np.median(v_time_peri))
-        data['peri']['mitoCa_time_median'].append(np.median(ca_mito_time_peri))
-        data['peri']['cytoCa_time_median'].append(np.median(ca_cyto_time_peri))
-        data['peri']['es_time_median'].append(np.median(e))
-        
-    
+
+        for loc in locs:
+            for direction in dirs:
+                for key in sub_data[loc][direction].keys():    
+                    data[loc][direction][key].append(sub_data[loc][direction][key])
+                data[loc][direction]['es_time'].append(e)
+
     return data
         
         
@@ -613,6 +589,16 @@ def get_force(
     return TFM_dataframe
         
         
-        
+def get_dotproduct(df,center):
+    start = df.iloc[0][['x', 'y']].values
+    end = df.iloc[-1][['x', 'y']].values
+    vec = end - start
+    ref = end - np.array(center)
+    dpr = np.dot(vec, ref)
+
+    return dpr
+
+def classify_by_dpr(dpr):
+    return 'anterograde' if dpr>0 else 'retrograde'       
         
         
